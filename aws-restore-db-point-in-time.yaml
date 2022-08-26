@@ -1,0 +1,158 @@
+---
+AWSTemplateFormatVersion: 2010-09-09                          
+Description: Restore AWS RDS Database Instance to Point-in-time using AWS Lambda Function
+
+Parameters:     
+  Environment:
+    Type: String    
+  Name:
+    Type: String
+
+Resources:
+  RestoreDBPITLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${Environment}-${Name}-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: !Sub '${Environment}-${Name}-role-policy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'               
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'  
+              - Effect: Allow
+                Action:
+                  - rds:AddTagsToResource
+                  - rds:DescribeDBInstances
+                  - rds:ModifyDBInstance
+                  - rds:DeleteDBInstance
+                  - rds:RestoreDBInstanceToPointInTime
+                Resource: '*'
+  RestoreDBPITLambdaFunction:
+      Type: AWS::Lambda::Function
+      Properties:
+        FunctionName: !Sub '${Environment}-${Name}-function'
+        Runtime: python3.9
+        Role:
+          Fn::GetAtt:
+            - RestoreDBPITLambdaRole
+            - Arn
+        Handler: index.lambda_handler
+        Description: Restore AWS RDS Database Instance to Point-in-time   
+        Timeout: 900
+        MemorySize: 256  
+        Code:
+          ZipFile: |            
+            import json
+            import boto3
+            import uuid
+            import time
+            import operator
+
+            def lambda_handler(event, context):
+                client = boto3.client('rds')
+                instance_check_resp = instance_checker(event, client)
+                if instance_check_resp:
+                    rename_delete(event, client)
+                restore_db_resp = restore_db(event, client)
+
+                return {
+                    'statusCode': 200,
+                    'body': restore_db_resp
+                }
+
+            def instance_checker(event, client):
+                print('********* Performing instance check with the target database identifier *********')
+                try:
+                    describe_db = client.describe_db_instances(
+                        DBInstanceIdentifier = event['RestoreDBInstanceIdentifier']
+                      
+                    )
+                    print(describe_db)
+                    return True
+                except:
+                    return False
+
+            def rename_delete(event, client):
+                print('********* The instance checker found an existing instance with the target database identifier and renaming it*********')
+                modify_db = client.modify_db_instance(
+                    DBInstanceIdentifier=event['RestoreDBInstanceIdentifier'],
+                    NewDBInstanceIdentifier=event['RestoreDBInstanceIdentifier']+"-"+str(uuid.uuid1())[:6],
+                    ApplyImmediately=True
+                )
+                print(modify_db)
+                print('********* Deleting database instance identified by the instance checker *********')
+                while True:
+                    try:
+                        describe_db = client.describe_db_instances(
+                            DBInstanceIdentifier = modify_db['DBInstance']['PendingModifiedValues']['DBInstanceIdentifier']
+                        )
+                        if describe_db:                            
+                            delete_db = client.delete_db_instance(
+                                DBInstanceIdentifier = modify_db['DBInstance']['PendingModifiedValues']['DBInstanceIdentifier'],
+                                SkipFinalSnapshot=False,
+                                FinalDBSnapshotIdentifier = modify_db['DBInstance']['PendingModifiedValues']['DBInstanceIdentifier']+"-final-ss",
+                                DeleteAutomatedBackups=False
+                            )
+                            print(delete_db)
+                            break
+                    except Exception as e:
+                        time.sleep(5)
+                        continue
+                    
+            def restore_db(event, client):
+                describe_db = client.describe_db_instances(
+                    DBInstanceIdentifier = event['DBInstanceIdentifier']
+                )
+                print('********* Performing point-in-time restoration *********')
+                restore_db = client.restore_db_instance_to_point_in_time(
+                    SourceDBInstanceIdentifier = event['DBInstanceIdentifier'],
+                    TargetDBInstanceIdentifier = event['RestoreDBInstanceIdentifier'],
+                    Engine = describe_db['DBInstances'][0]['Engine'],
+                    UseLatestRestorableTime = True,
+                    DBInstanceClass = describe_db['DBInstances'][0]['DBInstanceClass'],
+                    Port = describe_db['DBInstances'][0]['Endpoint']['Port'],
+                    AvailabilityZone = describe_db['DBInstances'][0]['AvailabilityZone'],
+                    DBSubnetGroupName = describe_db['DBInstances'][0]['DBSubnetGroup']['DBSubnetGroupName'],
+                    MultiAZ = describe_db['DBInstances'][0]['MultiAZ'],
+                    PubliclyAccessible = describe_db['DBInstances'][0]['PubliclyAccessible'],
+                    AutoMinorVersionUpgrade = describe_db['DBInstances'][0]['AutoMinorVersionUpgrade'],
+                    LicenseModel = describe_db['DBInstances'][0]['LicenseModel'],
+                    OptionGroupName = describe_db['DBInstances'][0]['OptionGroupMemberships'][0]['OptionGroupName'],
+                    CopyTagsToSnapshot =  describe_db['DBInstances'][0]['CopyTagsToSnapshot'],
+                    Tags = describe_db['DBInstances'][0]['TagList'],
+                    VpcSecurityGroupIds = list(map(operator.itemgetter('VpcSecurityGroupId'), describe_db['DBInstances'][0]['VpcSecurityGroups'])),
+                    EnableCloudwatchLogsExports = describe_db['DBInstances'][0]['EnabledCloudwatchLogsExports'],
+                    DBParameterGroupName = describe_db['DBInstances'][0]['DBParameterGroups'][0]['DBParameterGroupName'],
+                    EnableIAMDatabaseAuthentication = describe_db['DBInstances'][0]['IAMDatabaseAuthenticationEnabled'],
+                )
+                print(restore_db)
+                return restore_db                        
+     
+Outputs:
+  RestoreDBPITLambdaRoleARN:
+    Value:
+      Fn::GetAtt:
+        - RestoreDBPITLambdaRole
+        - Arn    
+    Export:
+      Name: !Sub RestoreDBPITLambdaRole
+  RestoreDBPITLambdaFunctionName:
+    Value: !Ref RestoreDBPITLambdaFunction
