@@ -9,9 +9,14 @@ For more information, visit [Restoring a DB instance to a specified time](https:
 ___
 ### Process Overview:
 * AWS Lambda uses Python 3.9 runtime and AWS SDK for Python (Boto3).
-* Specify source DB instance identifier from which to restore and target DB instance identifier to be created.
-* Check whether or not the DB instance exists with the target DB instance identifier. If it exists, modify the DB instance identifier with a random suffix, create a final DB snapshot and delete the DB instance.
-* Restore the DB instance to point-in-time with the latest restoration time using the source DB instance parameters configuration.
+* Use Lambda function payload to specify source DB instance identifier from which to restore and target DB instance identifier to be created.
+<pre><code>{
+    "RestoreDBInstanceIdentifier": "<b><i>source_db_instance_identifier</b></i>",
+    "DBInstanceIdentifier": "<b><i>target_db_instance_identifier</b></i>"
+}</pre></code>
+* The Lambda function checks whether or not the DB instance exists with the target DB instance identifier. If it exists, the Lambda function modifies the DB instance identifier with a random suffix, creates a final DB snapshot, and deletes the DB instance.
+* The Lambda function restores the DB instance to point-in-time with the latest restoration time using the source DB instance parameters configuration.
+
 ___
 ### Use Cases:
 * Restore the DB instance for other environments with the latest data.
